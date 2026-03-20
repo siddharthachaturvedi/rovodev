@@ -224,7 +224,7 @@ step "5/10" "Setting up assets"
 
 LOGO_PATH="$ROVODEV_ASSETS/rovo-logo.png"
 if [ ! -f "$LOGO_PATH" ]; then
-    echo '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' | base64 -d > "$LOGO_PATH"
+    echo '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' | base64 -d > "$LOGO_PATH"
     ok "Rovo logo installed"
 else
     ok "Rovo logo exists"
@@ -314,22 +314,32 @@ fi
 # ============================================================================
 step "7/10" "Setting up version control"
 
-if command -v git &>/dev/null; then
+# On a fresh Mac, /usr/bin/git exists as a shim that triggers the Xcode
+# Command Line Tools install dialog instead of actually working. We test
+# that git can execute a real command before relying on it.
+GIT_AVAILABLE=false
+if command -v git &>/dev/null && git --version &>/dev/null; then
+    GIT_AVAILABLE=true
+fi
+
+if $GIT_AVAILABLE; then
     if [ ! -d "$ROVODEV_WORKSPACE/.git" ]; then
         cd "$ROVODEV_WORKSPACE"
-        git init -q
-        git add -A
-        git commit -q -m "Initial workspace setup by Rovo Dev Launcher" --allow-empty
+        if git init -q 2>/dev/null && git add -A 2>/dev/null && git commit -q -m "Initial workspace setup by Rovo Dev Launcher" --allow-empty 2>/dev/null; then
+            ok "Git repository initialized in workspace"
+            info "Safety net: if anything goes wrong, run 'git checkout .' inside ~/rovodev/workspace/"
+        else
+            warn "Git init failed — skipping version control setup"
+            info "Not a problem — version control is optional."
+        fi
         cd - >/dev/null
-        ok "Git repository initialized in workspace"
-        info "Safety net: if anything goes wrong, run 'git checkout .' inside ~/rovodev/workspace/"
     else
         # Workspace already has git — check if there are uncommitted changes from a previous session
         cd "$ROVODEV_WORKSPACE"
         if git diff --quiet --exit-code 2>/dev/null && git diff --cached --quiet --exit-code 2>/dev/null; then
             ok "Git repo exists — workspace is clean"
         else
-            CHANGED=$(cd "$ROVODEV_WORKSPACE" && git status --short | wc -l | tr -d ' ')
+            CHANGED=$(cd "$ROVODEV_WORKSPACE" && git status --short 2>/dev/null | wc -l | tr -d ' ')
             ok "Git repo exists — ${CHANGED} file(s) changed since last commit"
             info "Review changes anytime with: cd ~/rovodev/workspace && git diff"
         fi
@@ -337,9 +347,8 @@ if command -v git &>/dev/null; then
     fi
 else
     warn "Git not found — skipping version control setup"
-    info "Git provides an undo safety net for your workspace."
-    info "To install git, your Mac will prompt you next time a tool needs it,"
-    info "or you can run: xcode-select --install"
+    info "Not a problem — version control is optional."
+    info "To install later: xcode-select --install"
 fi
 
 # ============================================================================
