@@ -12,9 +12,16 @@ cleanup() {
     echo -e "\n  ${RED}${BOLD}Installation cancelled.${NC}"
     echo -e "  ${DIM}You can re-run the launcher anytime to pick up where you left off.${NC}"
     echo ""
+    stop_background_server
     exit 130
 }
+stop_background_server() {
+    if [ -n "${SERVE_PID:-}" ] && kill -0 "${SERVE_PID}" 2>/dev/null; then
+        kill "${SERVE_PID}" 2>/dev/null || true
+    fi
+}
 trap cleanup INT
+trap stop_background_server EXIT
 
 # --- Elapsed time ---
 START_TIME=$(date +%s)
@@ -25,8 +32,27 @@ ROVODEV_BIN="$ROVODEV_HOME/bin"
 ROVODEV_WORKSPACE="$ROVODEV_HOME/workspace"
 ROVODEV_ASSETS="$ROVODEV_HOME/assets"
 ROVODEV_SKILLS="$HOME/.rovodev/skills"
+ROVODEV_GUI_TOKEN_FILE="$ROVODEV_HOME/gui-api-token"
 ACLI_BIN="$ROVODEV_BIN/acli"
 ATLASSIAN_SITE="hello.atlassian.net"
+ATLASSIAN_SITE_URL="https://${ATLASSIAN_SITE}"
+DEFAULT_SERVE_PORT="8123"
+DEFAULT_GUI_PORT="3210"
+EXPERIENCE="terminal"
+API_PORT="$DEFAULT_SERVE_PORT"
+GUI_PORT="$DEFAULT_GUI_PORT"
+SERVE_PID=""
+ROVODEV_GUI_DIR="$ROVODEV_HOME/gui"
+ROVODEV_RELEASE_REF="${ROVODEV_RELEASE_REF:-main}"
+
+# --- Runtime options ---
+RUN_MODE="tui"
+SERVE_PORT="$DEFAULT_SERVE_PORT"
+CREATE_SHORTCUT=true
+PIN_DOCK=true
+NON_INTERACTIVE=false
+AUTH_STATUS="unknown"
+SKIPPED_STEPS=()
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -39,15 +65,175 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m' # No Color
 
-# --- Terminal setup ---
-echo -ne "\033]0;PMM AI School\007"
-printf '\e[8;28;85t'
-
 # --- Helper functions ---
 ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
 warn() { echo -e "  ${YELLOW}⚠${NC} $1"; }
 fail() { echo -e "  ${RED}✗${NC} $1"; }
 info() { echo -e "  ${BLUE}→${NC} $1"; }
+usage() {
+    cat << 'USAGE_EOF'
+Usage: rovodev-launcher.command [options]
+
+Options:
+  --experience <terminal|gui> Install/launch experience (default: terminal)
+  --mode <tui|serve>      Launch mode (default: tui)
+  --port <number>         Port for --mode serve (default: 8123)
+  --api-port <number>     API port for GUI mode (default: 8123)
+  --gui-port <number>     GUI web port (default: 3210)
+  --no-shortcut           Skip creating Desktop app shortcut
+  --no-dock               Skip Dock pinning
+  --non-interactive       Skip prompts and run with safe defaults
+  -h, --help              Show this help
+USAGE_EOF
+}
+pause_if_interactive() {
+    if [ "$NON_INTERACTIVE" != true ] && [ -t 0 ]; then
+        read -n 1 -s -r -p "  Press any key to exit..."
+    fi
+}
+record_skip() {
+    SKIPPED_STEPS+=("$1")
+}
+ensure_gui_token_file() {
+    if [ "$EXPERIENCE" != "gui" ]; then
+        return
+    fi
+
+    mkdir -p "$ROVODEV_HOME"
+
+    if [ -n "${ROVODEV_API_BEARER_TOKEN:-}" ]; then
+        printf "%s" "$ROVODEV_API_BEARER_TOKEN" > "$ROVODEV_GUI_TOKEN_FILE"
+        chmod 600 "$ROVODEV_GUI_TOKEN_FILE"
+        ok "Stored GUI API token from environment"
+        return
+    fi
+
+    if [ -s "$ROVODEV_GUI_TOKEN_FILE" ]; then
+        ok "Using existing GUI API token"
+        return
+    fi
+
+    if [ "$NON_INTERACTIVE" = true ]; then
+        warn "GUI API token not provided in non-interactive mode."
+        info "Set ROVODEV_API_BEARER_TOKEN when launching installer to fully automate GUI API access."
+        record_skip "GUI API token setup"
+        return
+    fi
+
+    echo ""
+    echo -e "  ${DIM}Enter your Rovo Dev API token for GUI server access.${NC}"
+    echo -e "  ${DIM}Input is hidden. Stored locally at ${ROVODEV_GUI_TOKEN_FILE}.${NC}"
+    read -r -s -p "  Token: " GUI_TOKEN_INPUT
+    echo ""
+    if [ -n "$GUI_TOKEN_INPUT" ]; then
+        printf "%s" "$GUI_TOKEN_INPUT" > "$ROVODEV_GUI_TOKEN_FILE"
+        chmod 600 "$ROVODEV_GUI_TOKEN_FILE"
+        ok "Stored GUI API token"
+    else
+        warn "No token entered; GUI API calls may fail until token is configured."
+        record_skip "GUI API token setup"
+    fi
+}
+require_cmd() {
+    local cmd="$1"
+    local purpose="$2"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        fail "Missing required command: $cmd (${purpose})"
+        echo -e "  ${DIM}Install or enable '$cmd' and re-run this launcher.${NC}"
+        pause_if_interactive
+        exit 1
+    fi
+}
+validate_serve_port() {
+    local port_value="$1"
+    local port_label="$2"
+    if ! [[ "$port_value" =~ ^[0-9]+$ ]]; then
+        fail "Invalid ${port_label} value: $port_value"
+        echo -e "  ${DIM}Use a numeric non-privileged port (1024-65535).${NC}"
+        exit 1
+    fi
+    if [ "$port_value" -lt 1024 ] || [ "$port_value" -gt 65535 ]; then
+        fail "Port out of range for ${port_label}: $port_value"
+        echo -e "  ${DIM}Use a non-privileged port between 1024 and 65535.${NC}"
+        exit 1
+    fi
+}
+is_port_in_use() {
+    local port_value="$1"
+    if ! command -v lsof >/dev/null 2>&1; then
+        return 1
+    fi
+    lsof -nP -iTCP:"$port_value" -sTCP:LISTEN >/dev/null 2>&1
+}
+find_available_port() {
+    local start_port="$1"
+    local end_port="$2"
+    local avoid_port="${3:-}"
+    local candidate
+    for ((candidate=start_port; candidate<=end_port; candidate++)); do
+        if [ -n "$avoid_port" ] && [ "$candidate" = "$avoid_port" ]; then
+            continue
+        fi
+        if ! is_port_in_use "$candidate"; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+resolve_port_conflict() {
+    local current_port="$1"
+    local port_label="$2"
+    local fallback_start="$3"
+    local fallback_end="$4"
+    local avoid_port="${5:-}"
+
+    local suggested_port
+    local option_hint="--port"
+    if [ "$port_label" = "GUI port" ]; then
+        option_hint="--gui-port"
+    fi
+    suggested_port="$(find_available_port "$fallback_start" "$fallback_end" "$avoid_port" || true)"
+    if [ -z "$suggested_port" ]; then
+        fail "$port_label $current_port is already in use, and no fallback ports were found in ${fallback_start}-${fallback_end}."
+        echo -e "  ${DIM}Use a free port with ${option_hint} <number>.${NC}"
+        exit 1
+    fi
+
+    echo -e "  ${YELLOW}⚠${NC} $port_label $current_port is already in use." >&2
+    if [ "$NON_INTERACTIVE" = true ]; then
+        echo -e "  ${BLUE}→${NC} Auto-selecting free fallback port: $suggested_port" >&2
+        echo "$suggested_port"
+        return 0
+    fi
+
+    read -r -p "  Use fallback port $suggested_port instead? [Y/n] " REPLY >&2
+    if [[ "$REPLY" =~ ^[Nn]$ ]]; then
+        fail "Port conflict not resolved."
+        echo -e "  ${DIM}Rerun with an explicit free port.${NC}"
+        exit 1
+    fi
+    echo "$suggested_port"
+}
+check_writable_parent() {
+    local path="$1"
+    local label="$2"
+    if [ -e "$path" ]; then
+        if [ ! -w "$path" ]; then
+            fail "No write permission for $label: $path"
+            echo -e "  ${DIM}Choose a user-writable location and re-run.${NC}"
+            exit 1
+        fi
+    else
+        local parent
+        parent="$(dirname "$path")"
+        if [ ! -d "$parent" ] || [ ! -w "$parent" ]; then
+            fail "Cannot create $label at $path (parent not writable)"
+            echo -e "  ${DIM}Check permissions for: $parent${NC}"
+            exit 1
+        fi
+    fi
+}
 step() {
     local current="${1%%/*}"
     local total="${1##*/}"
@@ -61,8 +247,120 @@ step() {
     echo -e "  ${BOLD}${PURPLE}$2${NC}"
 }
 
+# --- Parse args ---
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --experience)
+            shift
+            if [ $# -eq 0 ]; then
+                fail "--experience requires a value (terminal|gui)"
+                usage
+                exit 1
+            fi
+            EXPERIENCE="$1"
+            ;;
+        --mode)
+            shift
+            if [ $# -eq 0 ]; then
+                fail "--mode requires a value (tui|serve)"
+                usage
+                exit 1
+            fi
+            RUN_MODE="$1"
+            ;;
+        --port)
+            shift
+            if [ $# -eq 0 ]; then
+                fail "--port requires a numeric value"
+                usage
+                exit 1
+            fi
+            SERVE_PORT="$1"
+            ;;
+        --api-port)
+            shift
+            if [ $# -eq 0 ]; then
+                fail "--api-port requires a numeric value"
+                usage
+                exit 1
+            fi
+            API_PORT="$1"
+            ;;
+        --gui-port)
+            shift
+            if [ $# -eq 0 ]; then
+                fail "--gui-port requires a numeric value"
+                usage
+                exit 1
+            fi
+            GUI_PORT="$1"
+            ;;
+        --no-shortcut)
+            CREATE_SHORTCUT=false
+            ;;
+        --no-dock)
+            PIN_DOCK=false
+            ;;
+        --non-interactive)
+            NON_INTERACTIVE=true
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            fail "Unknown argument: $1"
+            usage
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+if [ "$EXPERIENCE" != "terminal" ] && [ "$EXPERIENCE" != "gui" ]; then
+    fail "Invalid --experience value: $EXPERIENCE"
+    usage
+    exit 1
+fi
+
+if [ "$RUN_MODE" != "tui" ] && [ "$RUN_MODE" != "serve" ]; then
+    fail "Invalid --mode value: $RUN_MODE"
+    usage
+    exit 1
+fi
+
+if [ "$RUN_MODE" = "serve" ]; then
+    validate_serve_port "$SERVE_PORT" "--port"
+fi
+
+if [ "$NON_INTERACTIVE" != true ] && [ ! -t 0 ]; then
+    warn "No interactive terminal detected; enabling --non-interactive mode."
+    NON_INTERACTIVE=true
+fi
+
+if [ "$EXPERIENCE" = "gui" ]; then
+    RUN_MODE="serve"
+    SERVE_PORT="$API_PORT"
+    validate_serve_port "$API_PORT" "--api-port"
+    validate_serve_port "$GUI_PORT" "--gui-port"
+    if [ "$API_PORT" = "$GUI_PORT" ]; then
+        fail "API port and GUI port cannot be the same value."
+        exit 1
+    fi
+    CREATE_SHORTCUT=false
+    PIN_DOCK=false
+fi
+
+# --- Terminal setup ---
+if [ -t 1 ] && [ -n "${TERM:-}" ]; then
+    echo -ne "\033]0;PMM AI School\007"
+    printf '\e[8;28;85t'
+fi
+
 # --- Banner ---
-clear
+if [ -t 1 ] && [ -n "${TERM:-}" ]; then
+    clear || true
+fi
 echo ""
 echo -e "${PURPLE}${BOLD}"
 cat << 'BANNER'
@@ -90,25 +388,64 @@ echo ""
 echo -e "${DIM}  ─────────────────────────────────────────────────────${NC}"
 echo ""
 
-# --- Magic passphrase gate ---
-echo -e "  Type \"${BOLD}alohomora${NC}\" to continue:"
-echo ""
-while true; do
-    read -p "  🪄 " SPELL
-    if [ "$(echo "$SPELL" | tr '[:upper:]' '[:lower:]')" = "alohomora" ]; then
-        echo ""
-        echo -e "  ${GREEN}${BOLD}✨ The map reveals itself...${NC}"
-        sleep 1
-        break
-    else
-        echo -e "  ${RED}  That spell doesn't work here. Try again.${NC}"
+# --- Experience selector ---
+if [ "$NON_INTERACTIVE" != true ] && [ "$EXPERIENCE" = "terminal" ]; then
+    echo -e "  Choose experience:"
+    echo -e "  ${DIM}1) Terminal (TUI)${NC}"
+    echo -e "  ${DIM}2) GUI (Web app + Rovo server)${NC}"
+    read -r -p "  Select [1/2] (default 1): " EXPERIENCE_CHOICE
+    if [ "$EXPERIENCE_CHOICE" = "2" ]; then
+        EXPERIENCE="gui"
+        RUN_MODE="serve"
+        SERVE_PORT="$API_PORT"
+        CREATE_SHORTCUT=false
+        PIN_DOCK=false
     fi
-done
+    echo ""
+fi
+
+# --- Magic passphrase gate ---
+if [ "$NON_INTERACTIVE" = true ] || [ "${ROVODEV_SKIP_GATE:-0}" = "1" ]; then
+    info "Skipping passphrase gate (--non-interactive or ROVODEV_SKIP_GATE=1)."
+    record_skip "Passphrase gate"
+else
+    echo -e "  Type \"${BOLD}alohomora${NC}\" to continue:"
+    echo ""
+    while true; do
+        read -r -p "  > " SPELL
+        if [ "$(echo "$SPELL" | tr '[:upper:]' '[:lower:]')" = "alohomora" ]; then
+            echo ""
+            echo -e "  ${GREEN}${BOLD}The map reveals itself...${NC}"
+            sleep 1
+            break
+        else
+            echo -e "  ${RED}  That spell doesn't work here. Try again.${NC}"
+        fi
+    done
+fi
 
 # ============================================================================
-# PHASE 1: Detect architecture
+# PHASE 1: Preflight and detect architecture
 # ============================================================================
-step "1/10" "Detecting system"
+step "1/10" "Preflight checks and system detection"
+
+require_cmd "curl" "download acli binary"
+require_cmd "uname" "detect architecture"
+require_cmd "sw_vers" "detect macOS version"
+require_cmd "mkdir" "create install directories"
+require_cmd "chmod" "make downloaded binaries executable"
+require_cmd "mktemp" "safe temporary files"
+require_cmd "base64" "install bundled Rovo logo"
+
+check_writable_parent "$ROVODEV_HOME" "Rovo Dev home"
+check_writable_parent "$HOME/.rovodev" "Rovo Dev config root"
+
+if curl -fsSI --connect-timeout 10 "https://acli.atlassian.com" >/dev/null 2>&1; then
+    ok "Network check passed (acli.atlassian.com reachable)"
+else
+    warn "Could not reach acli.atlassian.com (network/proxy restriction?)"
+    record_skip "Network preflight warning"
+fi
 
 ARCH=$(uname -m)
 if [ "$ARCH" = "arm64" ]; then
@@ -120,12 +457,38 @@ elif [ "$ARCH" = "x86_64" ]; then
 else
     fail "Unsupported architecture: $ARCH"
     echo -e "  ${DIM}This launcher supports macOS only (Apple Silicon or Intel).${NC}"
-    read -n 1 -s -r -p "  Press any key to exit..."
+    pause_if_interactive
     exit 1
 fi
 
 OS=$(sw_vers -productVersion 2>/dev/null || echo "unknown")
 ok "macOS $OS"
+
+if [ "$RUN_MODE" = "serve" ]; then
+    if command -v lsof >/dev/null 2>&1; then
+        if is_port_in_use "$SERVE_PORT"; then
+            SERVE_PORT="$(resolve_port_conflict "$SERVE_PORT" "Port" "$((SERVE_PORT + 1))" "$((SERVE_PORT + 25))")"
+            if [ "$EXPERIENCE" = "gui" ]; then
+                API_PORT="$SERVE_PORT"
+            fi
+        fi
+        ok "Port $SERVE_PORT is available for server mode"
+    else
+        warn "lsof not found, cannot pre-check port availability."
+        record_skip "Port availability pre-check"
+    fi
+fi
+
+if [ "$EXPERIENCE" = "gui" ]; then
+    require_cmd "npm" "run GUI web app"
+    require_cmd "node" "run GUI web app runtime"
+    if command -v lsof >/dev/null 2>&1; then
+        if is_port_in_use "$GUI_PORT"; then
+            GUI_PORT="$(resolve_port_conflict "$GUI_PORT" "GUI port" "$((GUI_PORT + 1))" "$((GUI_PORT + 25))" "$API_PORT")"
+        fi
+        ok "GUI port $GUI_PORT is available"
+    fi
+fi
 
 # ============================================================================
 # PHASE 2: Create folder structure
@@ -161,14 +524,20 @@ if [ -f "$ACLI_BIN" ]; then
         if [ "$NEW_VERSION" != "$CURRENT_VERSION" ] && [ "$NEW_VERSION" != "unknown" ]; then
             echo ""
             echo -e "  ${YELLOW}New version available: ${NEW_VERSION} (current: ${CURRENT_VERSION})${NC}"
-            read -p "  Update now? [Y/n] " -n 1 -r REPLY
-            echo ""
-            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            if [ "$NON_INTERACTIVE" = true ]; then
                 mv "$TEMP_ACLI" "$ACLI_BIN"
                 ok "Updated to ${NEW_VERSION}"
             else
-                rm -f "$TEMP_ACLI"
-                info "Skipped update"
+                read -r -p "  Update now? [Y/n] " -n 1 REPLY
+                echo ""
+                if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                    mv "$TEMP_ACLI" "$ACLI_BIN"
+                    ok "Updated to ${NEW_VERSION}"
+                else
+                    rm -f "$TEMP_ACLI"
+                    info "Skipped update"
+                    record_skip "acli update"
+                fi
             fi
         else
             ok "Already up to date"
@@ -201,19 +570,29 @@ step "4/10" "Checking authentication"
 
 if "$ACLI_BIN" rovodev auth status &>/dev/null; then
     ok "Authenticated with Atlassian"
+    AUTH_STATUS="authenticated"
 else
     warn "Not authenticated yet"
-    info "Opening browser for login..."
-    echo ""
-    echo -e "  ${DIM}Your browser will open. Sign in with your Atlassian account.${NC}"
-    echo -e "  ${DIM}After approving, return to this window.${NC}"
-    echo ""
-    "$ACLI_BIN" rovodev auth login
-    if "$ACLI_BIN" rovodev auth status &>/dev/null; then
-        ok "Authentication successful!"
+    if [ "$NON_INTERACTIVE" = true ]; then
+        warn "Skipping interactive login in --non-interactive mode."
+        info "Run manually: $ACLI_BIN rovodev auth login"
+        AUTH_STATUS="not_authenticated"
+        record_skip "Interactive auth login"
     else
-        warn "Authentication may not have completed."
-        info "You can re-authenticate later with: acli rovodev auth login"
+        info "Opening browser for login..."
+        echo ""
+        echo -e "  ${DIM}Your browser will open. Sign in with your Atlassian account.${NC}"
+        echo -e "  ${DIM}After approving, return to this window.${NC}"
+        echo ""
+        "$ACLI_BIN" rovodev auth login
+        if "$ACLI_BIN" rovodev auth status &>/dev/null; then
+            ok "Authentication successful!"
+            AUTH_STATUS="authenticated"
+        else
+            warn "Authentication may not have completed."
+            info "You can re-authenticate later with: acli rovodev auth login"
+            AUTH_STATUS="not_authenticated"
+        fi
     fi
 fi
 
@@ -228,6 +607,10 @@ if [ ! -f "$LOGO_PATH" ]; then
     ok "Rovo logo installed"
 else
     ok "Rovo logo exists"
+fi
+
+if [ "$EXPERIENCE" = "gui" ]; then
+    ensure_gui_token_file
 fi
 
 # ============================================================================
@@ -510,24 +893,74 @@ fi
 
 
 # ============================================================================
+# PHASE 8.5: Install GUI app (optional)
+# ============================================================================
+if [ "$EXPERIENCE" = "gui" ]; then
+    info "Preparing GUI app files..."
+    SCRIPT_SOURCE_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
+    if [ -d "$SCRIPT_SOURCE_DIR/gui" ]; then
+        rm -rf "$ROVODEV_GUI_DIR"
+        cp -R "$SCRIPT_SOURCE_DIR/gui" "$ROVODEV_GUI_DIR"
+        ok "Installed GUI files from local repository"
+    else
+        require_cmd "unzip" "extract GUI app package"
+        GUI_TMP_ZIP="$(mktemp)"
+        GUI_TMP_DIR="$(mktemp -d)"
+        if [ "$ROVODEV_RELEASE_REF" = "main" ] || [ "$ROVODEV_RELEASE_REF" = "master" ]; then
+            GUI_ARCHIVE_URL="https://github.com/siddharthachaturvedi/rovodev/archive/refs/heads/${ROVODEV_RELEASE_REF}.zip"
+            GUI_ARCHIVE_ROOT="rovodev-${ROVODEV_RELEASE_REF}"
+        else
+            GUI_ARCHIVE_URL="https://github.com/siddharthachaturvedi/rovodev/archive/refs/tags/${ROVODEV_RELEASE_REF}.zip"
+            GUI_ARCHIVE_ROOT="rovodev-${ROVODEV_RELEASE_REF}"
+        fi
+        if curl -fsSL --connect-timeout 30 -o "$GUI_TMP_ZIP" "$GUI_ARCHIVE_URL"; then
+            if unzip -q "$GUI_TMP_ZIP" -d "$GUI_TMP_DIR" && [ -d "$GUI_TMP_DIR/$GUI_ARCHIVE_ROOT/gui" ]; then
+                rm -rf "$ROVODEV_GUI_DIR"
+                cp -R "$GUI_TMP_DIR/$GUI_ARCHIVE_ROOT/gui" "$ROVODEV_GUI_DIR"
+                ok "Installed GUI files from remote archive"
+            else
+                fail "Could not extract GUI app from downloaded archive."
+                exit 1
+            fi
+        else
+            fail "Could not download GUI app bundle."
+            echo -e "  ${DIM}Check network and rerun, or run from a local clone containing /gui.${NC}"
+            exit 1
+        fi
+        rm -f "$GUI_TMP_ZIP"
+        rm -rf "$GUI_TMP_DIR"
+    fi
+fi
+
+# ============================================================================
 # PHASE 9: Create Desktop shortcut
 # ============================================================================
-step "9/10" "Creating Desktop shortcut"
+step "9/10" "Optional Desktop and Dock setup"
 
-DESKTOP_APP="$HOME/Desktop/Rovo Dev.app"
-if [ -d "$DESKTOP_APP" ]; then
-    ok "Desktop shortcut already exists"
-else
-    info "Building Rovo Dev.app for Desktop..."
+DESKTOP_DIR="${ROVODEV_DESKTOP_DIR:-$HOME/Desktop}"
+DESKTOP_APP="$DESKTOP_DIR/Rovo Dev.app"
 
-    # --- Create .app bundle structure ---
-    APP_CONTENTS="$DESKTOP_APP/Contents"
-    APP_MACOS="$APP_CONTENTS/MacOS"
-    APP_RESOURCES="$APP_CONTENTS/Resources"
-    mkdir -p "$APP_MACOS" "$APP_RESOURCES"
+if [ "$CREATE_SHORTCUT" = true ]; then
+    if [ ! -d "$DESKTOP_DIR" ]; then
+        warn "Desktop folder not found at $DESKTOP_DIR; skipping shortcut."
+        record_skip "Desktop shortcut (desktop folder missing)"
+    elif [ ! -w "$DESKTOP_DIR" ]; then
+        warn "Desktop folder is not writable; skipping shortcut."
+        record_skip "Desktop shortcut (desktop folder not writable)"
+    elif ! command -v osascript >/dev/null 2>&1; then
+        warn "osascript is unavailable; skipping Desktop shortcut."
+        record_skip "Desktop shortcut (osascript unavailable)"
+    elif [ -d "$DESKTOP_APP" ]; then
+        ok "Desktop shortcut already exists"
+    else
+        info "Building Rovo Dev.app for Desktop..."
 
-    # --- Create the launcher script ---
-    cat > "$APP_MACOS/launch" << 'LAUNCHER_EOF'
+        APP_CONTENTS="$DESKTOP_APP/Contents"
+        APP_MACOS="$APP_CONTENTS/MacOS"
+        APP_RESOURCES="$APP_CONTENTS/Resources"
+        mkdir -p "$APP_MACOS" "$APP_RESOURCES"
+
+        cat > "$APP_MACOS/launch" << 'LAUNCHER_EOF'
 #!/bin/bash
 # Rovo Dev Desktop Shortcut — opens Terminal and launches TUI
 ROVODEV_BIN="$HOME/rovodev/bin"
@@ -545,10 +978,9 @@ tell application "Terminal"
 end tell
 EOF
 LAUNCHER_EOF
-    chmod +x "$APP_MACOS/launch"
+        chmod +x "$APP_MACOS/launch"
 
-    # --- Create Info.plist ---
-    cat > "$APP_CONTENTS/Info.plist" << 'PLIST_EOF'
+        cat > "$APP_CONTENTS/Info.plist" << 'PLIST_EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -573,70 +1005,87 @@ LAUNCHER_EOF
 </plist>
 PLIST_EOF
 
-    # --- Convert rovo-logo.png to .icns ---
-    ICONSET_DIR=$(mktemp -d)/AppIcon.iconset
-    mkdir -p "$ICONSET_DIR"
+        if command -v sips >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
+            ICONSET_DIR=$(mktemp -d)/AppIcon.iconset
+            mkdir -p "$ICONSET_DIR"
 
-    # Generate all required icon sizes from the source PNG
-    for size in 16 32 64 128 256 512; do
-        sips -z $size $size "$LOGO_PATH" --out "$ICONSET_DIR/icon_${size}x${size}.png" &>/dev/null
-    done
-    for size in 16 32 128 256 512; do
-        double=$((size * 2))
-        sips -z $double $double "$LOGO_PATH" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" &>/dev/null
-    done
+            for size in 16 32 64 128 256 512; do
+                sips -z "$size" "$size" "$LOGO_PATH" --out "$ICONSET_DIR/icon_${size}x${size}.png" &>/dev/null
+            done
+            for size in 16 32 128 256 512; do
+                double=$((size * 2))
+                sips -z "$double" "$double" "$LOGO_PATH" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" &>/dev/null
+            done
 
-    if iconutil -c icns "$ICONSET_DIR" -o "$APP_RESOURCES/AppIcon.icns" 2>/dev/null; then
-        ok "Created Desktop shortcut with Rovo icon"
-    else
-        # Fallback: copy PNG directly (icon may not display perfectly)
-        cp "$LOGO_PATH" "$APP_RESOURCES/AppIcon.png"
-        warn "Created Desktop shortcut (icon conversion failed — using PNG fallback)"
+            if iconutil -c icns "$ICONSET_DIR" -o "$APP_RESOURCES/AppIcon.icns" 2>/dev/null; then
+                ok "Created Desktop shortcut with Rovo icon"
+            else
+                cp "$LOGO_PATH" "$APP_RESOURCES/AppIcon.png"
+                warn "Created Desktop shortcut (icon conversion failed; PNG fallback used)"
+                record_skip "Desktop shortcut icon conversion"
+            fi
+
+            rm -rf "$(dirname "$ICONSET_DIR")"
+        else
+            cp "$LOGO_PATH" "$APP_RESOURCES/AppIcon.png"
+            warn "Created Desktop shortcut without icns icon (sips/iconutil unavailable)"
+            record_skip "Desktop shortcut icon conversion tools"
+        fi
+
+        touch "$DESKTOP_APP"
+        info "Double-click 'Rovo Dev' on your Desktop to launch the TUI"
     fi
-
-    # Clean up temp iconset
-    rm -rf "$(dirname "$ICONSET_DIR")"
-
-    # Force macOS to register the new .app
-    touch "$DESKTOP_APP"
-
-    info "Double-click 'Rovo Dev' on your Desktop to launch the TUI"
-fi
-
-# --- Add to Dock (if not already there) ---
-DOCK_APP_PATH="$DESKTOP_APP"
-if defaults read com.apple.dock persistent-apps 2>/dev/null | grep -q "com.atlassian.rovodev.shortcut"; then
-    ok "Already pinned to Dock"
 else
-    # Add the .app to the end of the Dock's persistent-apps array
-    defaults write com.apple.dock persistent-apps -array-add \
-        "<dict>
-            <key>tile-data</key>
-            <dict>
-                <key>file-data</key>
+    info "Skipping Desktop shortcut (--no-shortcut)."
+    record_skip "Desktop shortcut (--no-shortcut)"
+fi
+
+if [ "$PIN_DOCK" = true ]; then
+    if [ ! -d "$DESKTOP_APP" ]; then
+        warn "Skipping Dock pin because Desktop app is unavailable."
+        record_skip "Dock pin (shortcut not available)"
+    elif ! command -v defaults >/dev/null 2>&1; then
+        warn "defaults command not available; skipping Dock pin."
+        record_skip "Dock pin (defaults unavailable)"
+    elif defaults read com.apple.dock persistent-apps 2>/dev/null | grep -q "com.atlassian.rovodev.shortcut"; then
+        ok "Already pinned to Dock"
+    else
+        DOCK_APP_PATH="$DESKTOP_APP"
+        if defaults write com.apple.dock persistent-apps -array-add \
+            "<dict>
+                <key>tile-data</key>
                 <dict>
-                    <key>_CFURLString</key>
-                    <string>file://${DOCK_APP_PATH// /%20}/</string>
-                    <key>_CFURLStringType</key>
-                    <integer>15</integer>
+                    <key>file-data</key>
+                    <dict>
+                        <key>_CFURLString</key>
+                        <string>file://${DOCK_APP_PATH// /%20}/</string>
+                        <key>_CFURLStringType</key>
+                        <integer>15</integer>
+                    </dict>
+                    <key>file-label</key>
+                    <string>Rovo Dev</string>
+                    <key>bundle-identifier</key>
+                    <string>com.atlassian.rovodev.shortcut</string>
                 </dict>
-                <key>file-label</key>
-                <string>Rovo Dev</string>
-                <key>bundle-identifier</key>
-                <string>com.atlassian.rovodev.shortcut</string>
-            </dict>
-            <key>tile-type</key>
-            <string>file-tile</string>
-        </dict>"
-    # Restart the Dock to pick up changes
-    killall Dock 2>/dev/null || true
-    ok "Pinned Rovo Dev to Dock"
+                <key>tile-type</key>
+                <string>file-tile</string>
+            </dict>"; then
+            killall Dock 2>/dev/null || true
+            ok "Pinned Rovo Dev to Dock"
+        else
+            warn "Could not pin app to Dock; continuing."
+            record_skip "Dock pin (defaults write failed)"
+        fi
+    fi
+else
+    info "Skipping Dock pin (--no-dock)."
+    record_skip "Dock pin (--no-dock)"
 fi
 
 # ============================================================================
-# PHASE 10: Launch TUI
+# PHASE 10: Launch selected mode
 # ============================================================================
-step "10/10" "Launching Rovo Dev TUI"
+step "10/10" "Launching Rovo Dev"
 
 ELAPSED=$(( $(date +%s) - START_TIME ))
 MINS=$((ELAPSED / 60))
@@ -645,26 +1094,99 @@ SECS=$((ELAPSED % 60))
 echo ""
 echo -e "${DIM}  ─────────────────────────────────────────────────────${NC}"
 echo ""
-echo -e "  ${GREEN}${BOLD}Ready!${NC} Launching Rovo Dev TUI..."
+echo -e "  ${GREEN}${BOLD}Ready!${NC} Preparing to launch Rovo Dev (${RUN_MODE} mode, ${EXPERIENCE} experience)..."
 echo -e "  ${DIM}Working directory: $ROVODEV_WORKSPACE${NC}"
 echo -e "  ${DIM}Skills installed: $(ls "$ROVODEV_SKILLS" 2>/dev/null | wc -l | tr -d ' ') skill(s) in ~/.rovodev/skills/${NC}"
+echo -e "  ${DIM}Auth status: ${AUTH_STATUS}${NC}"
+if [ "$RUN_MODE" = "serve" ]; then
+    echo -e "  ${DIM}Server/API port: ${SERVE_PORT}${NC}"
+    echo -e "  ${DIM}Billing site: ${ATLASSIAN_SITE_URL}${NC}"
+fi
+if [ "$EXPERIENCE" = "gui" ]; then
+    echo -e "  ${DIM}GUI web port: ${GUI_PORT}${NC}"
+fi
 if [ $MINS -gt 0 ]; then
     echo -e "  ${DIM}Setup completed in ${MINS}m ${SECS}s${NC}"
 else
     echo -e "  ${DIM}Setup completed in ${SECS}s${NC}"
 fi
 echo ""
-echo -e "  ${DIM}Tips:${NC}"
-echo -e "  ${DIM}  /models    — switch LLM model${NC}"
-echo -e "  ${DIM}  /skills    — list loaded skills${NC}"
-echo -e "  ${DIM}  /sessions  — manage sessions${NC}"
-echo -e "  ${DIM}  /clear     — reset context${NC}"
+
+if [ "${#SKIPPED_STEPS[@]}" -gt 0 ]; then
+    echo -e "  ${DIM}Optional steps skipped:${NC}"
+    for item in "${SKIPPED_STEPS[@]}"; do
+        echo -e "  ${DIM}  - ${item}${NC}"
+    done
+    echo ""
+fi
+
+if [ "$RUN_MODE" = "serve" ]; then
+    echo -e "  ${DIM}Server mode tips:${NC}"
+    echo -e "  ${DIM}  Local endpoint: http://127.0.0.1:${SERVE_PORT}${NC}"
+    echo -e "  ${DIM}  Quick check: curl -sS http://127.0.0.1:${SERVE_PORT}/healthcheck${NC}"
+else
+    echo -e "  ${DIM}TUI tips:${NC}"
+    echo -e "  ${DIM}  /models    — switch LLM model${NC}"
+    echo -e "  ${DIM}  /skills    — list loaded skills${NC}"
+    echo -e "  ${DIM}  /sessions  — manage sessions${NC}"
+    echo -e "  ${DIM}  /clear     — reset context${NC}"
+fi
 echo ""
 echo -e "  ${DIM}Next time:${NC}"
-echo -e "  ${DIM}  Click ${BOLD}Rovo Dev${NC}${DIM} in your Dock or on your Desktop to jump straight in.${NC}"
+if [ "$EXPERIENCE" = "gui" ]; then
+    echo -e "  ${DIM}  GUI URL: http://127.0.0.1:${GUI_PORT}${NC}"
+elif [ -d "$DESKTOP_APP" ]; then
+    echo -e "  ${DIM}  Click ${BOLD}Rovo Dev${NC}${DIM} in your Dock or on your Desktop to jump straight in.${NC}"
+else
+    if [ "$RUN_MODE" = "serve" ]; then
+        echo -e "  ${DIM}  Launch from Terminal: cd ~/rovodev/workspace && ~/rovodev/bin/acli rovodev serve ${SERVE_PORT}${NC}"
+    else
+        echo -e "  ${DIM}  Launch from Terminal: cd ~/rovodev/workspace && ~/rovodev/bin/acli rovodev tui${NC}"
+    fi
+fi
 echo ""
 echo -e "${DIM}  ─────────────────────────────────────────────────────${NC}"
 echo ""
 
 cd "$ROVODEV_WORKSPACE"
-exec "$ACLI_BIN" rovodev tui
+if [ "$EXPERIENCE" = "gui" ]; then
+    if [ "$AUTH_STATUS" != "authenticated" ]; then
+        warn "GUI mode may fail until authenticated. Run: $ACLI_BIN rovodev auth login"
+    fi
+    info "Starting Rovo Dev server on port $SERVE_PORT..."
+    "$ACLI_BIN" rovodev serve "$SERVE_PORT" --site-url "$ATLASSIAN_SITE_URL" --disable-session-token > "$ROVODEV_HOME/serve.log" 2>&1 &
+    SERVE_PID="$!"
+    sleep 2
+    if ! kill -0 "$SERVE_PID" 2>/dev/null; then
+        fail "Could not start Rovo Dev server. See $ROVODEV_HOME/serve.log"
+        info "If credentials changed recently, run: $ACLI_BIN rovodev auth login"
+        exit 1
+    fi
+    ok "Rovo Dev server is running (PID: $SERVE_PID)"
+    if [ ! -d "$ROVODEV_GUI_DIR" ]; then
+        fail "GUI app directory not found: $ROVODEV_GUI_DIR"
+        exit 1
+    fi
+    cd "$ROVODEV_GUI_DIR"
+    if [ ! -d "node_modules" ]; then
+        info "Installing GUI dependencies..."
+        npm install
+    fi
+    if command -v open >/dev/null 2>&1; then
+        open "http://127.0.0.1:${GUI_PORT}" >/dev/null 2>&1 || true
+    fi
+    export ROVODEV_API_BASE="http://127.0.0.1:${SERVE_PORT}"
+    if [ -s "$ROVODEV_GUI_TOKEN_FILE" ]; then
+        export ROVODEV_API_BEARER_TOKEN
+        ROVODEV_API_BEARER_TOKEN="$(cat "$ROVODEV_GUI_TOKEN_FILE")"
+    fi
+    info "Launching GUI at http://127.0.0.1:${GUI_PORT}"
+    npm run dev -- --port "$GUI_PORT"
+elif [ "$RUN_MODE" = "serve" ]; then
+    if [ "$AUTH_STATUS" != "authenticated" ]; then
+        warn "Server mode may fail until authenticated. Run: $ACLI_BIN rovodev auth login"
+    fi
+    exec "$ACLI_BIN" rovodev serve "$SERVE_PORT" --site-url "$ATLASSIAN_SITE_URL"
+else
+    exec "$ACLI_BIN" rovodev tui
+fi

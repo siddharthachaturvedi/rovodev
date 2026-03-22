@@ -1,0 +1,16 @@
+node_modules/
+.playwright-cli/
+output/
+package.json
+package-lock.json
+
+# Audit artifacts (keep scripts, ignore generated outputs)
+audit/*.png
+audit/*.jpg
+audit/*.jpeg
+audit/*.webp
+audit/*.txt
+audit/*.log
+
+# macOS/editor noise
+.DS_Store

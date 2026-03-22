@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure install command references installer script
+        run: |
+          grep -q "scripts/install.sh" README.md
+          grep -q "scripts/uninstall.sh" README.md
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install GUI dependencies
+        run: npm ci
+        working-directory: gui
+
+      - name: Build (includes TypeScript checks)
+        run: npm run build
+        working-directory: gui

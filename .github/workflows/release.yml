@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release artifacts
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          tar --exclude='.git' \
+              --exclude='node_modules' \
+              --exclude='gui/node_modules' \
+              --exclude='.playwright-cli' \
+              --exclude='audit/*.png' \
+              --exclude='audit/*.jpg' \
+              --exclude='audit/*.jpeg' \
+              --exclude='audit/*.webp' \
+              --exclude='audit/*.txt' \
+              --exclude='audit/*.log' \
+              -czf "dist/rovodev-${VERSION}.tar.gz" .
+          shasum -a 256 "dist/rovodev-${VERSION}.tar.gz" > "dist/checksums-${VERSION}.txt"
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/checksums-*.txt
