@@ -3,7 +3,6 @@ node_modules/
 output/
 package.json
 package-lock.json
-gui/*.tsbuildinfo
 
 # Audit artifacts (keep scripts, ignore generated outputs)
 audit/*.png

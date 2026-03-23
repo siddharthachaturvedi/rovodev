@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { deleteSession, restoreSession, toRouteError } from "@/lib/server/rovodev";
-import { cleanupSessionFolderMapping, ensureSessionFolder, getSessionFolder } from "@/lib/server/sessionStore";
+import { deleteSession, restoreSession } from "@/lib/server/rovodev";
+import { ensureSessionFolder, getSessionFolder } from "@/lib/server/sessionStore";
 
 type RouteContext = {
   params: Promise<{ sessionId: string }>;
@@ -27,8 +27,7 @@ export async function POST(_request: NextRequest, context: RouteContext) {
     }
     return NextResponse.json({ ok: true, sessionId, folderPath });
   } catch (error) {
-    const mapped = toRouteError(error, "SESSION_RESTORE_FAILED");
-    return NextResponse.json(mapped.body, { status: mapped.status });
+    return NextResponse.json({ error: (error as Error).message }, { status: 500 });
   }
 }
 
@@ -36,10 +35,8 @@ export async function DELETE(_request: NextRequest, context: RouteContext) {
   try {
     const { sessionId } = await context.params;
     await deleteSession(sessionId);
-    const cleanup = await cleanupSessionFolderMapping(sessionId, { archiveFolder: true });
-    return NextResponse.json({ ok: true, cleanup });
+    return NextResponse.json({ ok: true });
   } catch (error) {
-    const mapped = toRouteError(error, "SESSION_DELETE_FAILED");
-    return NextResponse.json(mapped.body, { status: mapped.status });
+    return NextResponse.json({ error: (error as Error).message }, { status: 500 });
   }
 }

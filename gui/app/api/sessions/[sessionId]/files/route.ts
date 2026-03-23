@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getIngestedArtifacts, getSessionFolder, ingestArtifactsFromSessionContext } from "@/lib/server/sessionStore";
+import { getSessionFolder } from "@/lib/server/sessionStore";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -8,43 +8,7 @@ type FileEntry = {
   size: number;
   mtime: string;
   isDirectory: boolean;
-  fullPath?: string;
-  source?: "session" | "ingested";
 };
-
-async function listDirFiles(baseDir: string): Promise<FileEntry[]> {
-  try {
-    const entries = await fs.readdir(baseDir, { withFileTypes: true });
-    const files: FileEntry[] = [];
-    for (const entry of entries) {
-      if (entry.name.startsWith(".")) continue;
-      const full = path.join(baseDir, entry.name);
-      try {
-        const stat = await fs.stat(full);
-        files.push({
-          name: entry.name,
-          size: stat.size,
-          mtime: stat.mtime.toISOString(),
-          isDirectory: entry.isDirectory(),
-          fullPath: full,
-          source: "session",
-        });
-      } catch {
-        files.push({
-          name: entry.name,
-          size: 0,
-          mtime: new Date().toISOString(),
-          isDirectory: entry.isDirectory(),
-          fullPath: full,
-          source: "session",
-        });
-      }
-    }
-    return files;
-  } catch {
-    return [];
-  }
-}
 
 export async function GET(
   _request: NextRequest,
@@ -61,17 +25,30 @@ export async function GET(
   }
 
   try {
-    await ingestArtifactsFromSessionContext(sessionId);
-    const ingested = await getIngestedArtifacts(folder);
-    const files = await listDirFiles(folder);
-    for (const file of files) {
-      if (!file.isDirectory && ingested[file.name]) {
-        file.source = "ingested";
+    const entries = await fs.readdir(folder, { withFileTypes: true });
+    const files: FileEntry[] = [];
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      try {
+        const stat = await fs.stat(path.join(folder, entry.name));
+        files.push({
+          name: entry.name,
+          size: stat.size,
+          mtime: stat.mtime.toISOString(),
+          isDirectory: entry.isDirectory(),
+        });
+      } catch {
+        files.push({
+          name: entry.name,
+          size: 0,
+          mtime: new Date().toISOString(),
+          isDirectory: entry.isDirectory(),
+        });
       }
     }
     files.sort((a, b) => {
       if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
-      return b.mtime.localeCompare(a.mtime);
+      return a.name.localeCompare(b.name);
     });
     return NextResponse.json({ files, folderPath: folder });
   } catch {
