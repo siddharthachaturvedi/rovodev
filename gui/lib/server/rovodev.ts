@@ -1,6 +1,31 @@
 import { SessionSummary, ServerHealth, UiStatus } from "@/lib/types";
 
 const DEFAULT_API_BASE = "http://127.0.0.1:8123";
+type BackendErrorCode =
+  | "BACKEND_UNAUTHORIZED"
+  | "BACKEND_FORBIDDEN"
+  | "BACKEND_NOT_FOUND"
+  | "BACKEND_CONFLICT"
+  | "BACKEND_UNAVAILABLE"
+  | "BACKEND_TIMEOUT"
+  | "BACKEND_BAD_RESPONSE"
+  | "BACKEND_ERROR";
+
+export class RovoDevApiError extends Error {
+  readonly status: number;
+  readonly path: string;
+  readonly body: unknown;
+  readonly code: BackendErrorCode;
+
+  constructor(input: { status: number; path: string; body: unknown; code: BackendErrorCode; message: string }) {
+    super(input.message);
+    this.name = "RovoDevApiError";
+    this.status = input.status;
+    this.path = input.path;
+    this.body = input.body;
+    this.code = input.code;
+  }
+}
 
 function apiBase(): string {
   return process.env.ROVODEV_API_BASE ?? DEFAULT_API_BASE;
@@ -28,20 +53,83 @@ async function readJsonSafe(response: Response): Promise<unknown> {
   }
 }
 
-async function getJson(path: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(`${apiBase()}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeader(),
-      ...(init?.headers ?? {})
+function classifyBackendCode(status: number): BackendErrorCode {
+  if (status === 401) return "BACKEND_UNAUTHORIZED";
+  if (status === 403) return "BACKEND_FORBIDDEN";
+  if (status === 404) return "BACKEND_NOT_FOUND";
+  if (status === 409) return "BACKEND_CONFLICT";
+  if (status === 408 || status === 504) return "BACKEND_TIMEOUT";
+  if (status === 502 || status === 503) return "BACKEND_UNAVAILABLE";
+  if (status >= 500) return "BACKEND_ERROR";
+  return "BACKEND_BAD_RESPONSE";
+}
+
+export function isRovoDevApiError(error: unknown): error is RovoDevApiError {
+  return error instanceof RovoDevApiError;
+}
+
+export function toRouteError(error: unknown, fallbackCode = "INTERNAL_ERROR"): { status: number; body: Record<string, unknown> } {
+  if (isRovoDevApiError(error)) {
+    const message =
+      typeof error.body === "object" && error.body && "detail" in (error.body as Record<string, unknown>)
+        ? String((error.body as Record<string, unknown>).detail)
+        : error.message;
+    return {
+      status: error.status >= 400 ? error.status : 502,
+      body: {
+        ok: false,
+        code: error.code,
+        error: message,
+        upstream: {
+          path: error.path,
+          status: error.status,
+          body: error.body,
+        },
+      },
+    };
+  }
+  return {
+    status: 500,
+    body: {
+      ok: false,
+      code: fallbackCode,
+      error: (error as Error)?.message ?? "Unexpected server error",
     },
-    cache: "no-store",
-    signal: init?.signal ?? AbortSignal.timeout(15000),
-  });
+  };
+}
+
+async function getJson(path: string, init?: RequestInit): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase()}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeader(),
+        ...(init?.headers ?? {})
+      },
+      cache: "no-store",
+      signal: init?.signal ?? AbortSignal.timeout(15000),
+    });
+  } catch (error) {
+    const timedOut = (error as Error)?.name === "TimeoutError" || (error as Error)?.name === "AbortError";
+    throw new RovoDevApiError({
+      status: timedOut ? 504 : 503,
+      path,
+      body: null,
+      code: timedOut ? "BACKEND_TIMEOUT" : "BACKEND_UNAVAILABLE",
+      message: timedOut ? `RovoDev API timeout (${path})` : `RovoDev API unavailable (${path})`,
+    });
+  }
   if (!response.ok) {
     const body = await readJsonSafe(response);
-    throw new Error(`RovoDev API request failed (${path}): ${response.status} ${JSON.stringify(body)}`);
+    throw new RovoDevApiError({
+      status: response.status,
+      path,
+      body,
+      code: classifyBackendCode(response.status),
+      message: `RovoDev API request failed (${path}): ${response.status} ${JSON.stringify(body)}`,
+    });
   }
   return readJsonSafe(response);
 }
@@ -183,18 +271,76 @@ export async function deleteSession(sessionId: string): Promise<void> {
   await getJson(`/v3/sessions/${sessionId}`, { method: "DELETE" });
 }
 
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isChatInProgressError(error: unknown): boolean {
+  const message = (error as Error)?.message ?? "";
+  return message.includes("409") || message.toLowerCase().includes("chat in progress");
+}
+
+export async function deleteAllSessions(): Promise<{ deletedIds: string[]; attempted: number }> {
+  const sessions = await listSessions();
+  const deletedIds: string[] = [];
+
+  for (const session of sessions) {
+    let deleted = false;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await deleteSession(session.id);
+        deletedIds.push(session.id);
+        deleted = true;
+        break;
+      } catch (error) {
+        if (!isChatInProgressError(error) || attempt === 2) {
+          break;
+        }
+        await cancelChat();
+        await sleep(200 + attempt * 200);
+      }
+    }
+    if (!deleted) {
+      // Final recovery path for stubborn current-session locks.
+      try {
+        await resetAgent();
+        await sleep(250);
+        await cancelChat();
+        await sleep(250);
+        await deleteSession(session.id);
+        deletedIds.push(session.id);
+        deleted = true;
+      } catch {
+        // ignore; continue best-effort cleanup
+      }
+    }
+    if (!deleted) {
+      // keep going; best-effort cleanup for every session
+      continue;
+    }
+  }
+
+  return { deletedIds, attempted: sessions.length };
+}
+
 export async function cancelChat(): Promise<void> {
   try {
-    await fetch(`${apiBase()}/v3/cancel`, {
+    await getJson("/v3/cancel", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeader() },
       body: "{}",
-      cache: "no-store",
       signal: AbortSignal.timeout(12000),
     });
   } catch {
     // Best-effort cancel -- if it times out, proceed anyway
   }
+}
+
+export async function cancelChatStrict(): Promise<void> {
+  await getJson("/v3/cancel", {
+    method: "POST",
+    body: "{}",
+    signal: AbortSignal.timeout(12000),
+  });
 }
 
 export async function setChatMessage(message: string, enableDeepPlan: boolean): Promise<void> {

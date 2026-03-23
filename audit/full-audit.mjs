@@ -67,6 +67,21 @@ async function dismissOnboardingIfPresent(page) {
   await page.keyboard.press("Escape").catch(() => {});
 }
 
+async function stabilizeBackendBeforeAudit(page) {
+  await page.evaluate(async () => {
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "cancel" }),
+    }).catch(() => {});
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "reset" }),
+    }).catch(() => {});
+  });
+}
+
 (async () => {
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
@@ -75,6 +90,8 @@ async function dismissOnboardingIfPresent(page) {
   await page.goto(BASE, { waitUntil: "networkidle" });
   await page.waitForTimeout(2000);
   await dismissOnboardingIfPresent(page);
+  await stabilizeBackendBeforeAudit(page);
+  await page.waitForTimeout(500);
   await page.screenshot({ path: "audit/01-initial.png", fullPage: true });
 
   log("\n=== SYNC AUDIT: CREATE THREAD ===");

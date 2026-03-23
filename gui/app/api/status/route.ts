@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
-import { fetchRuntimeStatus } from "@/lib/server/rovodev";
+import { fetchRuntimeStatus, toRouteError } from "@/lib/server/rovodev";
 
 export async function GET() {
-  const runtime = await fetchRuntimeStatus();
-  return NextResponse.json(runtime);
+  try {
+    const runtime = await fetchRuntimeStatus();
+    return NextResponse.json(runtime);
+  } catch (error) {
+    const mapped = toRouteError(error, "STATUS_FETCH_FAILED");
+    return NextResponse.json(mapped.body, { status: mapped.status });
+  }
 }

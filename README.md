@@ -1,44 +1,56 @@
 # RovoDev Hub
 
-RovoDev Hub is a zero-admin launcher + GUI shell around Atlassian CLI (`acli`) for macOS.
+Zero-admin launcher and GUI shell for Atlassian CLI (`acli`) on macOS.
 
-The goal is simple:
+> Product promise: after first-run setup, daily usage should not require Terminal.
+>
+> Origin story: I wanted this tool to exist, so I used RovoDev to build RovoDev Hub.
 
-> Click the **Rovo Dev Hub** icon in your Dock or on your Desktop. No Terminal needed after the first run.
+`macOS` • `no sudo` • `terminal + GUI` • `first-run onboarding`
 
-Yes, we know. Bold promise. We like living dangerously.
+## Why This Exists
 
-## Quick Install
+The goal was simple: one command, clean setup, and a usable UI for daily work.
+No mystery scripts, no brittle hand-holding, no "go read 11 docs first."
 
-Preferred stable entrypoint:
+## Install (recommended)
 
 ```bash
-bash <(curl -fsSL https://sidc.ai/rovodev/install)
+bash <(curl -fsSL https://sidc.ai/rovodev)
 ```
 
-Fallback (GitHub-hosted installer script):
+Fallback (GitHub-hosted installer):
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/siddharthachaturvedi/rovodev/main/scripts/install.sh)
 ```
 
-Local run from repo:
+Local from repo:
 
 ```bash
 bash rovodev-launcher.command
 ```
 
+## What You Get
+
+- Terminal and GUI experiences from one launcher
+- Session-scoped workspace safety (`~/rovodev/workspace/sessions/<session_id>/`)
+- First-run onboarding for auth + backend readiness
+- Graceful port conflict handling with auto-fallback
+- No `sudo` required
+
 ## Promise Status
 
-- **Current:** first run may still require one auth command (`acli rovodev auth login`) in some environments.
-- **Target:** first-run wizard inside GUI handles auth checks, backend controls, and setup progress.
-- **Definition of done:** open app icon, use Hub, never touch terminal for routine use.
+- **Current:** one auth command may still be required in some environments: `~/rovodev/bin/acli rovodev auth login`
+- **Target:** GUI onboarding handles auth status + backend lifecycle
+- **Done means:** click app icon and work, no routine Terminal usage
 
-## Experience Matrix
+## Quick Start Flow
 
-- **Terminal experience:** launches TUI (`acli rovodev tui`) or direct server mode (`serve`).
-- **GUI experience:** runs local backend + Next.js UI at `http://127.0.0.1:<gui-port>`.
-- **Session safety:** each session maps to `~/rovodev/workspace/sessions/<session_id>/`.
+1. Run install command
+2. Choose Option 1 / `--experience terminal` (Option 2 GUI is marked Coming Soon in launcher)
+3. Complete onboarding (auth check, backend start)
+4. Create thread and start building
 
 ## Launcher Options
 
@@ -46,83 +58,73 @@ bash rovodev-launcher.command
 bash rovodev-launcher.command [options]
 ```
 
-- `--experience terminal|gui` (default: `terminal`)
-- `--mode tui|serve` (default: `tui`)
-- `--port <number>` for terminal serve mode (default: `8123`)
-- `--api-port <number>` for GUI backend (default: `8123`)
-- `--gui-port <number>` for GUI web app (default: `3210`)
-- `--no-shortcut` skip Desktop app creation
-- `--no-dock` skip Dock pinning
-- `--non-interactive` skip prompts and use safe defaults
-- `-h`, `--help` show help
+| Option | Default | Purpose |
+|---|---:|---|
+| `--experience terminal|gui` | `terminal` | Choose TUI/server or GUI flow |
+| `--mode tui|serve` | `tui` | Launch mode for terminal experience |
+| `--port <n>` | `8123` | API port in terminal `serve` mode |
+| `--api-port <n>` | `8123` | Backend API port for GUI mode |
+| `--gui-port <n>` | `3210` | Web port for GUI app |
+| `--no-shortcut` | off | Skip Desktop app shortcut |
+| `--no-dock` | off | Skip Dock pin |
+| `--non-interactive` | off | Safe defaults without prompts |
+| `-h`, `--help` | - | Print usage |
 
-If a requested port is already occupied, launcher now auto-selects a nearby free fallback port and continues.
+If a selected port is occupied, launcher picks the next free fallback port and continues.
 
-## What Install Does
+## First-Run Onboarding (GUI)
 
-- Installs `acli` into `~/rovodev/bin` (no `sudo`)
-- Creates workspace in `~/rovodev/workspace`
-- Seeds local skills into `~/.rovodev/skills`
-- Optionally creates a Desktop app and Dock pin
-- For GUI mode, installs web app files into `~/rovodev/gui`
+The onboarding modal walks through:
 
-## First-Run UX (GUI)
+1. Welcome
+2. Auth status
+3. Backend start/restart
+4. Ready
 
-The onboarding flow is designed to guide:
+If auth is missing, it shows the exact command and supports re-check in-app.
 
-1. Welcome and quick tour
-2. Auth status check
-3. Backend start/restart controls
-4. Ready state
+## Release and Versioning
 
-If auth is missing, the app gives you the exact command and a re-check button.
+Install/uninstall scripts resolve a release tag automatically, with optional overrides:
 
-## Release-Based Packaging
-
-Installer and uninstaller scripts resolve a release tag (or use `ROVODEV_VERSION` override), download that archive, and run the launcher/uninstaller from that version.
-
-Useful env vars:
-
-- `ROVODEV_VERSION=vX.Y.Z` to pin install version
-- `ROVODEV_REPO=owner/repo` to target a fork
-- `ROVODEV_RELEASE_REF=<tag|main>` for launcher archive fetch in GUI mode
-
-## Troubleshooting
-
-- **Auth says missing**
-  - Run: `~/rovodev/bin/acli rovodev auth login`
-- **Backend won’t start**
-  - Check log: `~/rovodev/gui-backend.log`
-- **GUI cannot connect**
-  - Verify: `curl -sS http://127.0.0.1:8123/healthcheck`
-- **Port conflict**
-  - Launcher auto-falls back to a free nearby port.
-  - To force specific ports anyway: `--api-port 8124 --gui-port 3211`
-- **macOS says app cannot be verified**
-  - One-time allow in **System Settings → Privacy & Security** (Open Anyway), then relaunch.
-  - Or remove quarantine attribute manually: `xattr -dr com.apple.quarantine ~/rovodev`
-- **Corporate restrictions**
-  - Desktop/Dock setup may be skipped, launcher continues.
+- `ROVODEV_VERSION=vX.Y.Z` pin a release
+- `ROVODEV_REPO=owner/repo` use a fork
+- `ROVODEV_RELEASE_REF=<tag|main>` control launcher archive ref
 
 ## Uninstall
 
-Preferred stable entrypoint:
+Hosted entrypoint:
 
 ```bash
 bash <(curl -fsSL https://sidc.ai/rovodev/uninstall)
 ```
 
-Fallback (GitHub-hosted uninstaller script):
+Fallback (GitHub-hosted uninstaller):
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/siddharthachaturvedi/rovodev/main/scripts/uninstall.sh)
 ```
 
-Local run from repo:
+Local from repo:
 
 ```bash
 bash rovodev-uninstall.command
 ```
+
+## Troubleshooting
+
+- **Auth missing**
+  - `~/rovodev/bin/acli rovodev auth login`
+- **Backend not starting**
+  - Check `~/rovodev/gui-backend.log`
+- **GUI cannot connect**
+  - `curl -sS http://127.0.0.1:8123/healthcheck`
+- **Port conflicts**
+  - Auto-fallback is built in, or pass explicit ports:
+  - `--api-port 8124 --gui-port 3211`
+- **macOS Gatekeeper warning**
+  - System Settings -> Privacy and Security -> Open Anyway
+  - Or: `xattr -dr com.apple.quarantine ~/rovodev`
 
 ## Caution
 

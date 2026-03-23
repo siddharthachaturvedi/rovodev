@@ -38,6 +38,7 @@ ATLASSIAN_SITE="hello.atlassian.net"
 ATLASSIAN_SITE_URL="https://${ATLASSIAN_SITE}"
 DEFAULT_SERVE_PORT="8123"
 DEFAULT_GUI_PORT="3210"
+GUI_COMING_SOON=true
 EXPERIENCE="terminal"
 API_PORT="$DEFAULT_SERVE_PORT"
 GUI_PORT="$DEFAULT_GUI_PORT"
@@ -339,16 +340,23 @@ if [ "$NON_INTERACTIVE" != true ] && [ ! -t 0 ]; then
 fi
 
 if [ "$EXPERIENCE" = "gui" ]; then
-    RUN_MODE="serve"
-    SERVE_PORT="$API_PORT"
-    validate_serve_port "$API_PORT" "--api-port"
-    validate_serve_port "$GUI_PORT" "--gui-port"
-    if [ "$API_PORT" = "$GUI_PORT" ]; then
-        fail "API port and GUI port cannot be the same value."
-        exit 1
+    if [ "$GUI_COMING_SOON" = true ]; then
+        warn "GUI install (Option 2) is coming soon. Falling back to Terminal experience (Option 1)."
+        EXPERIENCE="terminal"
+        RUN_MODE="tui"
+        record_skip "GUI install (coming soon)"
+    else
+        RUN_MODE="serve"
+        SERVE_PORT="$API_PORT"
+        validate_serve_port "$API_PORT" "--api-port"
+        validate_serve_port "$GUI_PORT" "--gui-port"
+        if [ "$API_PORT" = "$GUI_PORT" ]; then
+            fail "API port and GUI port cannot be the same value."
+            exit 1
+        fi
+        CREATE_SHORTCUT=false
+        PIN_DOCK=false
     fi
-    CREATE_SHORTCUT=false
-    PIN_DOCK=false
 fi
 
 # --- Terminal setup ---
@@ -392,14 +400,13 @@ echo ""
 if [ "$NON_INTERACTIVE" != true ] && [ "$EXPERIENCE" = "terminal" ]; then
     echo -e "  Choose experience:"
     echo -e "  ${DIM}1) Terminal (TUI)${NC}"
-    echo -e "  ${DIM}2) GUI (Web app + Rovo server)${NC}"
+    echo -e "  ${DIM}2) GUI (Web app + Rovo server) ${YELLOW}[Coming Soon]${NC}"
     read -r -p "  Select [1/2] (default 1): " EXPERIENCE_CHOICE
     if [ "$EXPERIENCE_CHOICE" = "2" ]; then
-        EXPERIENCE="gui"
-        RUN_MODE="serve"
-        SERVE_PORT="$API_PORT"
-        CREATE_SHORTCUT=false
-        PIN_DOCK=false
+        warn "Option 2 (GUI) is coming soon. Please choose Option 1 for now."
+        EXPERIENCE="terminal"
+        RUN_MODE="tui"
+        record_skip "GUI install (coming soon)"
     fi
     echo ""
 fi
