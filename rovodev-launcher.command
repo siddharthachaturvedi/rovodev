@@ -72,7 +72,10 @@ NC='\033[0m' # No Color
 # --- Helper functions ---
 ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
 warn() { echo -e "  ${YELLOW}⚠${NC} $1"; }
-fail() { echo -e "  ${RED}✗${NC} $1"; }
+fail() {
+    echo -e "  ${RED}✗${NC} $1"
+    echo -e "  ${DIM}Need help debugging? Slack @sidc${NC}"
+}
 info() { echo -e "  ${BLUE}→${NC} $1"; }
 open_rovo_token_page() {
     info "If prompted for an API token, create one at: ${ROVODEV_TOKEN_URL}"
@@ -475,6 +478,7 @@ BANNER
 echo -e "${NC}"
 echo -e "${DIM}  Zero-admin installer & launcher for Atlassian employees${NC}"
 echo -e "${DIM}  Site: ${ATLASSIAN_SITE}${NC}"
+echo -e "  ${CYAN}${BOLD}Debug support: Slack @sidc${NC}"
 echo ""
 echo -e "${DIM}  ─────────────────────────────────────────────────────${NC}"
 echo ""
@@ -502,26 +506,6 @@ if [ "$NON_INTERACTIVE" != true ] && [ "$EXPERIENCE" = "terminal" ]; then
         record_skip "GUI install (coming soon)"
     fi
     echo ""
-fi
-
-# --- Magic passphrase gate ---
-if [ "$NON_INTERACTIVE" = true ] || [ "${ROVODEV_SKIP_GATE:-0}" = "1" ]; then
-    info "Skipping passphrase gate (--non-interactive or ROVODEV_SKIP_GATE=1)."
-    record_skip "Passphrase gate"
-else
-    echo -e "  Type \"${BOLD}alohomora${NC}\" to continue:"
-    echo ""
-    while true; do
-        read -r -p "  > " SPELL
-        if [ "$(echo "$SPELL" | tr '[:upper:]' '[:lower:]')" = "alohomora" ]; then
-            echo ""
-            echo -e "  ${GREEN}${BOLD}The map reveals itself...${NC}"
-            sleep 1
-            break
-        else
-            echo -e "  ${RED}  That spell doesn't work here. Try again.${NC}"
-        fi
-    done
 fi
 
 # ============================================================================
