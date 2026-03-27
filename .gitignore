@@ -12,5 +12,9 @@ audit/*.webp
 audit/*.txt
 audit/*.log
 
+# GUI local / generated noise
+gui/tsconfig.tsbuildinfo
+gui/research-reports/
+
 # macOS/editor noise
 .DS_Store
