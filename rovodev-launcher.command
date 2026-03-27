@@ -36,6 +36,7 @@ ROVODEV_GUI_TOKEN_FILE="$ROVODEV_HOME/gui-api-token"
 ACLI_BIN="$ROVODEV_BIN/acli"
 ATLASSIAN_SITE="hello.atlassian.net"
 ATLASSIAN_SITE_URL="https://${ATLASSIAN_SITE}"
+ROVODEV_TOKEN_URL="https://go.atlassian.com/rovo-dev-api-token"
 DEFAULT_SERVE_PORT="8123"
 DEFAULT_GUI_PORT="3210"
 GUI_COMING_SOON=true
@@ -73,6 +74,12 @@ ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
 warn() { echo -e "  ${YELLOW}⚠${NC} $1"; }
 fail() { echo -e "  ${RED}✗${NC} $1"; }
 info() { echo -e "  ${BLUE}→${NC} $1"; }
+open_rovo_token_page() {
+    info "If prompted for an API token, create one at: ${ROVODEV_TOKEN_URL}"
+    if command -v open >/dev/null 2>&1; then
+        open "${ROVODEV_TOKEN_URL}" >/dev/null 2>&1 || true
+    fi
+}
 run_acli() {
     GIT_PYTHON_REFRESH=quiet GIT_PYTHON_GIT_EXECUTABLE="${ROVODEV_GIT_EXECUTABLE:-git}" "$ACLI_BIN" "$@"
 }
@@ -113,6 +120,7 @@ ensure_rovodev_access() {
         info "Refreshing authentication now..."
         run_acli rovodev auth logout >/dev/null 2>&1 || true
         info "Expected Atlassian site: ${ATLASSIAN_SITE_URL}"
+        open_rovo_token_page
         run_acli rovodev auth login
 
         if run_acli rovodev auth status &>/dev/null && check_rovodev_access; then
@@ -673,6 +681,7 @@ else
         echo -e "  ${DIM}After approving, return to this window.${NC}"
         echo ""
         info "Expected Atlassian site: ${ATLASSIAN_SITE_URL}"
+        open_rovo_token_page
         run_acli rovodev auth login
         if run_acli rovodev auth status &>/dev/null; then
             ok "Authentication successful!"
