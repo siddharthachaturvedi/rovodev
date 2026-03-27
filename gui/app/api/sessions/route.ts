@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { cancelChat, createSession, listSessions } from "@/lib/server/rovodev";
 import { ensureSessionFolder, getSessionFolder } from "@/lib/server/sessionStore";
 
@@ -31,7 +31,7 @@ export async function GET() {
   }
 }
 
-export async function POST(_request: NextRequest) {
+export async function POST() {
   try {
     let session;
     try {

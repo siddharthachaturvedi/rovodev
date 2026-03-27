@@ -853,7 +853,7 @@ export default function HomePage() {
     }
   }
 
-  // Lifecycle
+  // Lifecycle: mount-only polling; loadSessions/loadStatus identities are intentionally not deps
   useEffect(() => {
     loadSessions();
     loadStatus();
@@ -880,6 +880,7 @@ export default function HomePage() {
       window.clearInterval(stuckChecker);
       stopStream();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only
   }, []);
 
   useEffect(() => {
@@ -966,6 +967,7 @@ export default function HomePage() {
     loadSessionFiles(activeSessionId);
     const fi = window.setInterval(() => loadSessionFiles(), 15000);
     return () => window.clearInterval(fi);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- latestResult only seeds empty history; full activeSession in deps would over-fetch
   }, [activeSessionId]);
 
   useEffect(() => {
