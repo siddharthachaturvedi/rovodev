@@ -45,6 +45,8 @@ GUI_PORT="$DEFAULT_GUI_PORT"
 SERVE_PID=""
 ROVODEV_GUI_DIR="$ROVODEV_HOME/gui"
 ROVODEV_RELEASE_REF="${ROVODEV_RELEASE_REF:-main}"
+ROVODEV_GIT_SHIM_DIR="$ROVODEV_HOME/shims"
+ROVODEV_GIT_SHIM="$ROVODEV_GIT_SHIM_DIR/git"
 
 # --- Runtime options ---
 RUN_MODE="tui"
@@ -71,6 +73,84 @@ ok()   { echo -e "  ${GREEN}✓${NC} $1"; }
 warn() { echo -e "  ${YELLOW}⚠${NC} $1"; }
 fail() { echo -e "  ${RED}✗${NC} $1"; }
 info() { echo -e "  ${BLUE}→${NC} $1"; }
+run_acli() {
+    GIT_PYTHON_REFRESH=quiet GIT_PYTHON_GIT_EXECUTABLE="${ROVODEV_GIT_EXECUTABLE:-git}" "$ACLI_BIN" "$@"
+}
+check_rovodev_access() {
+    local err_tmp
+    local err_text
+    err_tmp="$(mktemp)"
+    if run_acli rovodev --help >/dev/null 2>"$err_tmp"; then
+        rm -f "$err_tmp"
+        return 0
+    fi
+    err_text="$(<"$err_tmp")"
+    rm -f "$err_tmp"
+    if [[ "$err_text" == *"403 Forbidden"* ]]; then
+        return 2
+    fi
+    return 1
+}
+ensure_rovodev_access() {
+    check_rovodev_access
+    local access_code=$?
+
+    if [ "$access_code" -eq 0 ]; then
+        ok "Rovo Dev access check passed"
+        return 0
+    fi
+
+    if [ "$access_code" -eq 2 ]; then
+        warn "Rovo Dev access is forbidden (403) with current credentials."
+        if [ "$NON_INTERACTIVE" = true ]; then
+            warn "Cannot auto re-authenticate in --non-interactive mode."
+            info "Run manually in a terminal: $ACLI_BIN rovodev auth login"
+            AUTH_STATUS="not_authenticated"
+            record_skip "Interactive auth login (required by 403)"
+            return 1
+        fi
+
+        info "Refreshing authentication now..."
+        run_acli rovodev auth logout >/dev/null 2>&1 || true
+        info "Expected Atlassian site: ${ATLASSIAN_SITE_URL}"
+        run_acli rovodev auth login
+
+        if run_acli rovodev auth status &>/dev/null && check_rovodev_access; then
+            ok "Re-authentication successful"
+            AUTH_STATUS="authenticated"
+            return 0
+        fi
+
+        fail "Authentication completed, but Rovo Dev access is still denied."
+        info "Confirm your account has Rovo Dev access for ${ATLASSIAN_SITE_URL}, then re-run."
+        return 1
+    fi
+
+    warn "Could not verify Rovo Dev access. Continuing with best effort."
+    record_skip "Rovo Dev access verification"
+    return 0
+}
+configure_git_fallback_for_acli() {
+    # Fresh macOS installs often have a /usr/bin/git shim that exits non-zero
+    # and prompts for Xcode CLT. GitPython treats that as fatal during startup.
+    if command -v xcode-select >/dev/null 2>&1 && ! xcode-select -p >/dev/null 2>&1; then
+        mkdir -p "$ROVODEV_GIT_SHIM_DIR"
+        cat > "$ROVODEV_GIT_SHIM" << 'GIT_SHIM_EOF'
+#!/bin/bash
+if [ "${1:-}" = "version" ]; then
+    echo "git version 2.39.0"
+    exit 0
+fi
+echo "git is unavailable on this Mac until Xcode Command Line Tools are installed." >&2
+exit 1
+GIT_SHIM_EOF
+        chmod +x "$ROVODEV_GIT_SHIM"
+        export PATH="$ROVODEV_GIT_SHIM_DIR:$PATH"
+        export ROVODEV_GIT_EXECUTABLE="$ROVODEV_GIT_SHIM"
+        warn "Xcode Command Line Tools not found; using a lightweight git fallback for Rovo Dev startup."
+        record_skip "Workspace git setup (Xcode CLT not installed)"
+    fi
+}
 usage() {
     cat << 'USAGE_EOF'
 Usage: rovodev-launcher.command [options]
@@ -446,6 +526,7 @@ require_cmd "base64" "install bundled Rovo logo"
 
 check_writable_parent "$ROVODEV_HOME" "Rovo Dev home"
 check_writable_parent "$HOME/.rovodev" "Rovo Dev config root"
+configure_git_fallback_for_acli
 
 if curl -fsSI --connect-timeout 10 "https://acli.atlassian.com" >/dev/null 2>&1; then
     ok "Network check passed (acli.atlassian.com reachable)"
@@ -519,7 +600,7 @@ step "3/10" "Installing Atlassian CLI"
 DOWNLOAD_URL="https://acli.atlassian.com/darwin/latest/${ACLI_ARCH}/acli"
 
 if [ -f "$ACLI_BIN" ]; then
-    CURRENT_VERSION=$("$ACLI_BIN" --version 2>/dev/null || echo "unknown")
+    CURRENT_VERSION=$(run_acli --version 2>/dev/null || echo "unknown")
     ok "acli already installed (${CURRENT_VERSION})"
 
     # Check for updates
@@ -527,7 +608,7 @@ if [ -f "$ACLI_BIN" ]; then
     TEMP_ACLI=$(mktemp)
     if curl -fsSL --connect-timeout 10 -o "$TEMP_ACLI" "$DOWNLOAD_URL" 2>/dev/null; then
         chmod +x "$TEMP_ACLI"
-        NEW_VERSION=$("$TEMP_ACLI" --version 2>/dev/null || echo "unknown")
+        NEW_VERSION=$(GIT_PYTHON_REFRESH=quiet GIT_PYTHON_GIT_EXECUTABLE="${ROVODEV_GIT_EXECUTABLE:-git}" "$TEMP_ACLI" --version 2>/dev/null || echo "unknown")
         if [ "$NEW_VERSION" != "$CURRENT_VERSION" ] && [ "$NEW_VERSION" != "unknown" ]; then
             echo ""
             echo -e "  ${YELLOW}New version available: ${NEW_VERSION} (current: ${CURRENT_VERSION})${NC}"
@@ -558,7 +639,7 @@ else
     info "Downloading acli (${ACLI_ARCH})..."
     if curl -fsSL --connect-timeout 30 --progress-bar -o "$ACLI_BIN" "$DOWNLOAD_URL"; then
         chmod +x "$ACLI_BIN"
-        VERSION=$("$ACLI_BIN" --version 2>/dev/null || echo "unknown")
+        VERSION=$(run_acli --version 2>/dev/null || echo "unknown")
         ok "Installed acli ${VERSION}"
     else
         fail "Download failed. Check your network connection."
@@ -575,7 +656,7 @@ export PATH="$ROVODEV_BIN:$PATH"
 # ============================================================================
 step "4/10" "Checking authentication"
 
-if "$ACLI_BIN" rovodev auth status &>/dev/null; then
+if run_acli rovodev auth status &>/dev/null; then
     ok "Authenticated with Atlassian"
     AUTH_STATUS="authenticated"
 else
@@ -591,8 +672,9 @@ else
         echo -e "  ${DIM}Your browser will open. Sign in with your Atlassian account.${NC}"
         echo -e "  ${DIM}After approving, return to this window.${NC}"
         echo ""
-        "$ACLI_BIN" rovodev auth login
-        if "$ACLI_BIN" rovodev auth status &>/dev/null; then
+        info "Expected Atlassian site: ${ATLASSIAN_SITE_URL}"
+        run_acli rovodev auth login
+        if run_acli rovodev auth status &>/dev/null; then
             ok "Authentication successful!"
             AUTH_STATUS="authenticated"
         else
@@ -601,6 +683,11 @@ else
             AUTH_STATUS="not_authenticated"
         fi
     fi
+fi
+
+if ! ensure_rovodev_access; then
+    pause_if_interactive
+    exit 1
 fi
 
 # ============================================================================
@@ -702,44 +789,9 @@ fi
 # ============================================================================
 # PHASE 7: Git-init workspace (safety net)
 # ============================================================================
-step "7/10" "Setting up version control"
-
-# On a fresh Mac, /usr/bin/git exists as a shim that triggers the Xcode
-# Command Line Tools install dialog instead of actually working. We test
-# that git can execute a real command before relying on it.
-GIT_AVAILABLE=false
-if command -v git &>/dev/null && git --version &>/dev/null; then
-    GIT_AVAILABLE=true
-fi
-
-if $GIT_AVAILABLE; then
-    if [ ! -d "$ROVODEV_WORKSPACE/.git" ]; then
-        cd "$ROVODEV_WORKSPACE"
-        if git init -q 2>/dev/null && git add -A 2>/dev/null && git commit -q -m "Initial workspace setup by Rovo Dev Launcher" --allow-empty 2>/dev/null; then
-            ok "Git repository initialized in workspace"
-            info "Safety net: if anything goes wrong, run 'git checkout .' inside ~/rovodev/workspace/"
-        else
-            warn "Git init failed — skipping version control setup"
-            info "Not a problem — version control is optional."
-        fi
-        cd - >/dev/null
-    else
-        # Workspace already has git — check if there are uncommitted changes from a previous session
-        cd "$ROVODEV_WORKSPACE"
-        if git diff --quiet --exit-code 2>/dev/null && git diff --cached --quiet --exit-code 2>/dev/null; then
-            ok "Git repo exists — workspace is clean"
-        else
-            CHANGED=$(cd "$ROVODEV_WORKSPACE" && git status --short 2>/dev/null | wc -l | tr -d ' ')
-            ok "Git repo exists — ${CHANGED} file(s) changed since last commit"
-            info "Review changes anytime with: cd ~/rovodev/workspace && git diff"
-        fi
-        cd - >/dev/null
-    fi
-else
-    warn "Git not found — skipping version control setup"
-    info "Not a problem — version control is optional."
-    info "To install later: xcode-select --install"
-fi
+step "7/10" "Skipping optional git workspace setup"
+info "Skipping workspace git initialization to avoid Xcode Command Line Tools dependency."
+record_skip "Workspace git setup"
 
 # ============================================================================
 # PHASE 8: Install skills
@@ -1161,7 +1213,7 @@ if [ "$EXPERIENCE" = "gui" ]; then
         warn "GUI mode may fail until authenticated. Run: $ACLI_BIN rovodev auth login"
     fi
     info "Starting Rovo Dev server on port $SERVE_PORT..."
-    "$ACLI_BIN" rovodev serve "$SERVE_PORT" --site-url "$ATLASSIAN_SITE_URL" --disable-session-token > "$ROVODEV_HOME/serve.log" 2>&1 &
+    run_acli rovodev serve "$SERVE_PORT" --site-url "$ATLASSIAN_SITE_URL" --disable-session-token > "$ROVODEV_HOME/serve.log" 2>&1 &
     SERVE_PID="$!"
     sleep 2
     if ! kill -0 "$SERVE_PID" 2>/dev/null; then
@@ -1193,7 +1245,7 @@ elif [ "$RUN_MODE" = "serve" ]; then
     if [ "$AUTH_STATUS" != "authenticated" ]; then
         warn "Server mode may fail until authenticated. Run: $ACLI_BIN rovodev auth login"
     fi
-    exec "$ACLI_BIN" rovodev serve "$SERVE_PORT" --site-url "$ATLASSIAN_SITE_URL"
+    exec env GIT_PYTHON_REFRESH=quiet GIT_PYTHON_GIT_EXECUTABLE="${ROVODEV_GIT_EXECUTABLE:-git}" "$ACLI_BIN" rovodev serve "$SERVE_PORT" --site-url "$ATLASSIAN_SITE_URL"
 else
-    exec "$ACLI_BIN" rovodev tui
+    exec env GIT_PYTHON_REFRESH=quiet GIT_PYTHON_GIT_EXECUTABLE="${ROVODEV_GIT_EXECUTABLE:-git}" "$ACLI_BIN" rovodev tui
 fi
