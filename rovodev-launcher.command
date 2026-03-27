@@ -181,7 +181,12 @@ pause_if_interactive() {
     fi
 }
 record_skip() {
-    SKIPPED_STEPS+=("$1")
+    local item="$1"
+    local existing_items="${SKIPPED_STEPS[*]-}"
+    case " ${existing_items} " in
+        *" ${item} "*) return ;;
+    esac
+    SKIPPED_STEPS+=("$item")
 }
 ensure_gui_token_file() {
     if [ "$EXPERIENCE" != "gui" ]; then
@@ -1217,10 +1222,13 @@ echo -e "${DIM}  ─────────────────────
 echo ""
 
 cd "$ROVODEV_WORKSPACE"
+if [ "$AUTH_STATUS" != "authenticated" ]; then
+    fail "Cannot launch Rovo Dev without valid authentication."
+    info "Run: $ACLI_BIN rovodev auth login"
+    pause_if_interactive
+    exit 1
+fi
 if [ "$EXPERIENCE" = "gui" ]; then
-    if [ "$AUTH_STATUS" != "authenticated" ]; then
-        warn "GUI mode may fail until authenticated. Run: $ACLI_BIN rovodev auth login"
-    fi
     info "Starting Rovo Dev server on port $SERVE_PORT..."
     run_acli rovodev serve "$SERVE_PORT" --site-url "$ATLASSIAN_SITE_URL" --disable-session-token > "$ROVODEV_HOME/serve.log" 2>&1 &
     SERVE_PID="$!"
@@ -1251,9 +1259,6 @@ if [ "$EXPERIENCE" = "gui" ]; then
     info "Launching GUI at http://127.0.0.1:${GUI_PORT}"
     npm run dev -- --port "$GUI_PORT"
 elif [ "$RUN_MODE" = "serve" ]; then
-    if [ "$AUTH_STATUS" != "authenticated" ]; then
-        warn "Server mode may fail until authenticated. Run: $ACLI_BIN rovodev auth login"
-    fi
     exec env GIT_PYTHON_REFRESH=quiet GIT_PYTHON_GIT_EXECUTABLE="${ROVODEV_GIT_EXECUTABLE:-git}" "$ACLI_BIN" rovodev serve "$SERVE_PORT" --site-url "$ATLASSIAN_SITE_URL"
 else
     exec env GIT_PYTHON_REFRESH=quiet GIT_PYTHON_GIT_EXECUTABLE="${ROVODEV_GIT_EXECUTABLE:-git}" "$ACLI_BIN" rovodev tui
